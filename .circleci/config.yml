@@ -1,0 +1,189 @@
+version: 2.1
+
+jobs:
+  build-and-push:
+    docker:
+      - image: cimg/node:18.0
+    steps:
+      - checkout
+      - setup_remote_docker
+      - run:
+          name: Install AWS CLI
+          command: sudo apt update && sudo apt install -y awscli
+      - run:
+          name: Login to AWS ECR
+          command: |
+            aws ecr get-login-password --region ap-south-1 | \
+              docker login --username AWS --password-stdin \
+              320042238069.dkr.ecr.ap-south-1.amazonaws.com
+      - run:
+          name: Build Docker Image
+          command: docker build -t shopping-cart .
+      - run:
+          name: Tag and Push to ECR
+          command: |
+            docker tag shopping-cart:latest \
+              320042238069.dkr.ecr.ap-south-1.amazonaws.com/shopping-cart:latest
+            docker push \
+              320042238069.dkr.ecr.ap-south-1.amazonaws.com/shopping-cart:latest
+
+  terraform-plan:
+    docker:
+      - image: hashicorp/terraform:1.6.0
+    steps:
+      - checkout
+      - run:
+          name: Write SSH public key
+          command: |
+            mkdir -p ~/.ssh
+            echo "$EC2_SSH_PUBLIC_KEY" > ~/.ssh/id_rsa.pub
+            chmod 644 ~/.ssh/id_rsa.pub
+      - run:
+          name: Terraform Init
+          command: |
+            cd terraform
+            terraform init \
+              -backend-config="bucket=$TF_STATE_BUCKET" \
+              -backend-config="key=shopping-cart/terraform.tfstate" \
+              -backend-config="region=us-west-2"
+      - run:
+          name: Terraform Plan
+          command: |
+            cd terraform
+            terraform plan
+
+  terraform-apply:
+    docker:
+      - image: hashicorp/terraform:1.6.0
+    steps:
+      - checkout
+      - run:
+          name: Write SSH public key
+          command: |
+            mkdir -p ~/.ssh
+            echo "$EC2_SSH_PUBLIC_KEY" > ~/.ssh/id_rsa.pub
+            chmod 644 ~/.ssh/id_rsa.pub
+      - run:
+          name: Terraform Init
+          command: |
+            cd terraform
+            terraform init \
+              -backend-config="bucket=$TF_STATE_BUCKET" \
+              -backend-config="key=shopping-cart/terraform.tfstate" \
+              -backend-config="region=us-west-2"
+      - run:
+          name: Terraform Apply
+          command: |
+            cd terraform
+            terraform apply -auto-approve
+      - run:
+          name: Save EC2 IP to workspace
+          command: |
+            cd terraform
+            terraform output -raw instance_public_ip > /tmp/ec2_ip.txt
+            echo "EC2 IP: $(cat /tmp/ec2_ip.txt)"
+      - persist_to_workspace:
+          root: /tmp
+          paths:
+            - ec2_ip.txt
+
+  deploy:
+    docker:
+      - image: cimg/base:stable
+    steps:
+      - checkout
+      - attach_workspace:
+          at: /tmp
+      - add_ssh_keys:
+          fingerprints:
+            - "${SSH_KEY_FINGERPRINT}"
+      - run:
+          name: Install AWS CLI
+          command: sudo apt update && sudo apt install -y awscli
+      - run:
+          name: Wait for EC2 SSH
+          command: |
+            EC2_IP=$(cat /tmp/ec2_ip.txt)
+            echo "Waiting for SSH on $EC2_IP ..."
+            for i in $(seq 1 30); do
+              if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
+                   ubuntu@$EC2_IP "echo ok" 2>/dev/null; then
+                echo "EC2 is reachable"
+                break
+              fi
+              echo "Attempt $i/30 — retrying in 10s"
+              sleep 10
+            done
+      - run:
+          name: Wait for Docker on EC2
+          command: |
+            EC2_IP=$(cat /tmp/ec2_ip.txt)
+            ssh -o StrictHostKeyChecking=no ubuntu@$EC2_IP \
+              "for i in \$(seq 1 20); do
+                 command -v docker && echo 'docker ready' && break
+                 echo 'waiting for docker...'
+                 sleep 10
+               done"
+      - run:
+          name: Clone or update repo on EC2
+          command: |
+            EC2_IP=$(cat /tmp/ec2_ip.txt)
+            ssh -o StrictHostKeyChecking=no ubuntu@$EC2_IP "
+              if [ ! -d /home/ubuntu/E-commerce-website ]; then
+                git clone https://github.com/jeevankanipakam-bit/shopping-cart-ecom.git \
+                  /home/ubuntu/E-commerce-website
+              else
+                cd /home/ubuntu/E-commerce-website && git pull
+              fi
+            "
+      - run:
+          name: Write .env file on EC2
+          command: |
+            EC2_IP=$(cat /tmp/ec2_ip.txt)
+            cat > /tmp/app.env << 'ENVEOF'
+POSTGRES_USER=admin
+POSTGRES_PASSWORD=User@2022
+POSTGRES_DB=ShoppingCart
+ENVIRONMENT=Development
+TokenKey=Fn96MkrL3D5RQDL333423JHG23dRJ7tfhA6URq3ax5nDh26UmCNZDq
+AdminPassword=AdminUser@2022
+DefaultConnection="host=database;port=5432;username=admin;password=User@2021;database=ShoppingCart"
+ENVEOF
+            scp -o StrictHostKeyChecking=no /tmp/app.env \
+              ubuntu@$EC2_IP:/home/ubuntu/E-commerce-website/E-commerce-website-main/.env
+      - run:
+          name: Pull ECR image and start app
+          command: |
+            EC2_IP=$(cat /tmp/ec2_ip.txt)
+            ssh -o StrictHostKeyChecking=no ubuntu@$EC2_IP "
+              aws ecr get-login-password --region ap-south-1 | \
+                sudo docker login --username AWS --password-stdin \
+                320042238069.dkr.ecr.ap-south-1.amazonaws.com &&
+              sudo docker pull \
+                320042238069.dkr.ecr.ap-south-1.amazonaws.com/shopping-cart:latest &&
+              sudo docker tag \
+                320042238069.dkr.ecr.ap-south-1.amazonaws.com/shopping-cart:latest \
+                shopping-cart:latest &&
+              cd /home/ubuntu/E-commerce-website/E-commerce-website-main &&
+              sudo docker-compose down &&
+              sudo docker-compose up -d
+            "
+
+workflows:
+  version: 2
+  build-deploy:
+    jobs:
+      - build-and-push
+      - terraform-plan:
+          requires:
+            - build-and-push
+      - hold-for-approval:
+          type: approval
+          requires:
+            - terraform-plan
+      - terraform-apply:
+          requires:
+            - hold-for-approval
+      - deploy:
+          requires:
+            - terraform-apply
