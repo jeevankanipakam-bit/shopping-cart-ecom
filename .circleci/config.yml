@@ -131,15 +131,15 @@ jobs:
           name: Write .env file on EC2
           command: |
             EC2_IP=$(cat /tmp/ec2_ip.txt)
-            cat > /tmp/app.env << 'ENVEOF'
-POSTGRES_USER=admin
-POSTGRES_PASSWORD=User@2022
-POSTGRES_DB=ShoppingCart
-ENVIRONMENT=Development
-TokenKey=Fn96MkrL3D5RQDL333423JHG23dRJ7tfhA6URq3ax5nDh26UmCNZDq
-AdminPassword=AdminUser@2022
-DefaultConnection="host=database;port=5432;username=admin;password=User@2021;database=ShoppingCart"
-ENVEOF
+            {
+              echo "POSTGRES_USER=admin"
+              echo "POSTGRES_PASSWORD=User@2022"
+              echo "POSTGRES_DB=ShoppingCart"
+              echo "ENVIRONMENT=Development"
+              echo "TokenKey=Fn96MkrL3D5RQDL333423JHG23dRJ7tfhA6URq3ax5nDh26UmCNZDq"
+              echo "AdminPassword=AdminUser@2022"
+              echo 'DefaultConnection="host=database;port=5432;username=admin;password=User@2021;database=ShoppingCart"'
+            } > /tmp/app.env
             scp -o StrictHostKeyChecking=no /tmp/app.env \
               ubuntu@$EC2_IP:/home/ubuntu/E-commerce-website/E-commerce-website-main/.env
       - run:
