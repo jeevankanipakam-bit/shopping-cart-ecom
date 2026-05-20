@@ -33,12 +33,6 @@ jobs:
     steps:
       - checkout
       - run:
-          name: Write SSH public key
-          command: |
-            mkdir -p ~/.ssh
-            echo "$EC2_SSH_PUBLIC_KEY" > ~/.ssh/id_rsa.pub
-            chmod 644 ~/.ssh/id_rsa.pub
-      - run:
           name: Terraform Init
           command: |
             cd terraform
@@ -57,12 +51,6 @@ jobs:
       - image: hashicorp/terraform:1.6.0
     steps:
       - checkout
-      - run:
-          name: Write SSH public key
-          command: |
-            mkdir -p ~/.ssh
-            echo "$EC2_SSH_PUBLIC_KEY" > ~/.ssh/id_rsa.pub
-            chmod 644 ~/.ssh/id_rsa.pub
       - run:
           name: Terraform Init
           command: |
@@ -94,12 +82,15 @@ jobs:
       - checkout
       - attach_workspace:
           at: /tmp
-      - add_ssh_keys:
-          fingerprints:
-            - "${SSH_KEY_FINGERPRINT}"
       - run:
           name: Install AWS CLI
           command: sudo apt update && sudo apt install -y awscli
+      - run:
+          name: Setup SSH key
+          command: |
+            mkdir -p ~/.ssh
+            echo "$EC2_SSH_PRIVATE_KEY" | tr -d '\r' > ~/.ssh/id_rsa
+            chmod 600 ~/.ssh/id_rsa
       - run:
           name: Wait for EC2 SSH
           command: |

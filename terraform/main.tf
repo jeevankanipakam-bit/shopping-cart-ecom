@@ -25,8 +25,8 @@ module "ec2" {
   instance_type     = var.instance_type
   subnet_id         = module.network.subnet_id
   security_group_id = module.network.security_group_id
-  key_name          = var.key_name
-  public_key_path   = var.public_key_path
+  key_name           = var.key_name
+  ec2_ssh_public_key = var.ec2_ssh_public_key
   github_repo_url   = var.github_repo_url
 }
 

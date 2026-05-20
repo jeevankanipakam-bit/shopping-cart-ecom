@@ -12,6 +12,6 @@ variable "ami" {}
 variable "instance_type" {}
 
 variable "key_name" {}
-variable "public_key_path" {}
+variable "ec2_ssh_public_key" {}
 
 variable "github_repo_url" {}

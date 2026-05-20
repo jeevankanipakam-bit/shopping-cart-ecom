@@ -23,7 +23,7 @@ resource "aws_iam_instance_profile" "ec2_profile" {
 
 resource "aws_key_pair" "deployer" {
   key_name   = var.key_name
-  public_key = file(pathexpand(var.public_key_path))
+  public_key = var.ec2_ssh_public_key
 }
 
 resource "aws_instance" "web_server" {
