@@ -15,3 +15,8 @@ variable "key_name" {}
 variable "ec2_ssh_public_key" {}
 
 variable "github_repo_url" {}
+
+variable "ecr_repository_name" {
+  description = "Name of the ECR repository"
+  type        = string
+}

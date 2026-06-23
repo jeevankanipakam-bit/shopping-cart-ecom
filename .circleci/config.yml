@@ -26,54 +26,16 @@ jobs:
               320042238069.dkr.ecr.ap-south-1.amazonaws.com/shopping-cart:latest
             docker push \
               320042238069.dkr.ecr.ap-south-1.amazonaws.com/shopping-cart:latest
-
-  terraform-plan:
-    docker:
-      - image: hashicorp/terraform:1.6.0
-    steps:
-      - checkout
       - run:
-          name: Terraform Init
+          name: Log Build Success
           command: |
-            cd terraform
-            terraform init \
-              -backend-config="bucket=$TF_STATE_BUCKET" \
-              -backend-config="key=shopping-cart/terraform.tfstate" \
-              -backend-config="region=us-west-2"
-      - run:
-          name: Terraform Plan
-          command: |
-            cd terraform
-            terraform plan
-
-  terraform-apply:
-    docker:
-      - image: hashicorp/terraform:1.6.0
-    steps:
-      - checkout
-      - run:
-          name: Terraform Init
-          command: |
-            cd terraform
-            terraform init \
-              -backend-config="bucket=$TF_STATE_BUCKET" \
-              -backend-config="key=shopping-cart/terraform.tfstate" \
-              -backend-config="region=us-west-2"
-      - run:
-          name: Terraform Apply
-          command: |
-            cd terraform
-            terraform apply -auto-approve
-      - run:
-          name: Save EC2 IP to workspace
-          command: |
-            cd terraform
-            terraform output -raw instance_public_ip > /tmp/ec2_ip.txt
-            echo "EC2 IP: $(cat /tmp/ec2_ip.txt)"
-      - persist_to_workspace:
-          root: /tmp
-          paths:
-            - ec2_ip.txt
+            echo "Build and Push to ECR completed successfully at $(date)"
+      - on_fail:
+          - run:
+              name: Log Build Failure
+              command: |
+                echo "ERROR: Build and Push to ECR failed at $(date)" >> /tmp/pipeline_errors.log
+                cat /tmp/pipeline_errors.log
 
   deploy:
     docker:
@@ -91,6 +53,15 @@ jobs:
             mkdir -p ~/.ssh
             echo "$EC2_SSH_PRIVATE_KEY" | tr -d '\r' > ~/.ssh/id_rsa
             chmod 600 ~/.ssh/id_rsa
+      - run:
+          name: Verify EC2 IP
+          command: |
+            if [ -f /tmp/ec2_ip.txt ]; then
+              echo "EC2 IP found: $(cat /tmp/ec2_ip.txt)"
+            else
+              echo "ERROR: EC2 IP file not found"
+              exit 1
+            fi
       - run:
           name: Wait for EC2 SSH
           command: |
@@ -159,22 +130,45 @@ jobs:
               sudo docker-compose down &&
               sudo docker-compose up -d
             "
+      - run:
+          name: Log Deployment Success
+          command: |
+            echo "Deployment completed successfully at $(date)" >> /tmp/deployment_log.txt
+      - on_fail:
+          - run:
+              name: Log Deployment Error
+              command: |
+                ERROR_MSG="ERROR: Deployment failed at $(date) for branch: $CIRCLE_BRANCH commit: $CIRCLE_SHA1"
+                echo "$ERROR_MSG" >> /tmp/pipeline_errors.log
+                echo "Deployment Error: $ERROR_MSG"
+
+  notify-failure:
+    docker:
+      - image: cimg/base:stable
+    steps:
+      - run:
+          name: Send Error Notification
+          command: |
+            echo "PIPELINE FAILURE ALERT"
+            echo "======================="
+            echo "Build/Deploy pipeline failed"
+            echo "Repository: $CIRCLE_REPOSITORY_URL"
+            echo "Branch: $CIRCLE_BRANCH"
+            echo "Commit: $CIRCLE_SHA1"
+            echo "Time: $(date)"
+            echo ""
+            echo "Check CircleCI dashboard for details: $CIRCLE_BUILD_URL"
 
 workflows:
   version: 2
   build-deploy:
     jobs:
       - build-and-push
-      - terraform-plan:
-          requires:
-            - build-and-push
-      - hold-for-approval:
-          type: approval
-          requires:
-            - terraform-plan
-      - terraform-apply:
-          requires:
-            - hold-for-approval
       - deploy:
           requires:
-            - terraform-apply
+            - build-and-push
+      - notify-failure:
+          requires:
+            - build-and-push
+            - deploy
+          when: on_fail

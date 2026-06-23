@@ -30,6 +30,14 @@ module "ec2" {
   github_repo_url   = var.github_repo_url
 }
 
+module "ecr" {
+  source = "./modules/ecr"
+
+  repository_name       = var.ecr_repository_name
+  image_tag_mutability  = "MUTABLE"
+  scan_on_push          = true
+}
+
 resource "aws_lb" "app_alb" {
   name               = "shopping-cart-alb"
   internal           = false
@@ -75,4 +83,19 @@ output "alb_dns_name" {
 
 output "instance_public_ip" {
   value = module.ec2.instance_public_ip
+}
+
+output "ecr_repository_url" {
+  description = "URL of the ECR repository"
+  value       = module.ecr.repository_url
+}
+
+output "ecr_repository_arn" {
+  description = "ARN of the ECR repository"
+  value       = module.ecr.repository_arn
+}
+
+output "ecr_registry_id" {
+  description = "AWS Account ID of the ECR registry"
+  value       = module.ecr.registry_id
 }
