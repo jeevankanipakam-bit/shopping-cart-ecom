@@ -85,6 +85,11 @@ output "instance_public_ip" {
   value = module.ec2.instance_public_ip
 }
 
+output "instance_elastic_ip" {
+  description = "Elastic IP assigned to the EC2 instance"
+  value       = module.ec2.instance_elastic_ip
+}
+
 output "ecr_repository_url" {
   description = "URL of the ECR repository"
   value       = module.ecr.repository_url

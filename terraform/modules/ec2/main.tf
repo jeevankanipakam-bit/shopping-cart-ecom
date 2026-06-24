@@ -48,3 +48,8 @@ resource "aws_instance" "web_server" {
     Name = "terraform-ec2"
   }
 }
+
+resource "aws_eip" "web_server_eip" {
+  instance = aws_instance.web_server.id
+  domain   = "vpc"
+}

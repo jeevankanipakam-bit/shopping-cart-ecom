@@ -3,50 +3,54 @@ version: 2.1
 jobs:
   build-and-push:
     docker:
-      - image: cimg/node:18.0
+      - image: cimg/base:stable
     steps:
       - checkout
       - setup_remote_docker
       - run:
           name: Install AWS CLI
-          command: sudo apt update && sudo apt install -y awscli
-      - run:
-          name: Login to AWS ECR
           command: |
-            aws ecr get-login-password --region ap-south-1 | \
-              docker login --username AWS --password-stdin \
-              320042238069.dkr.ecr.ap-south-1.amazonaws.com
+            sudo apt-get update -y
+            sudo apt-get install -y python3 python3-pip curl
+            pip3 install --upgrade awscli
       - run:
-          name: Build Docker Image
-          command: docker build -t shopping-cart .
-      - run:
-          name: Tag and Push to ECR
+          name: Validate ECR configuration
           command: |
-            docker tag shopping-cart:latest \
-              320042238069.dkr.ecr.ap-south-1.amazonaws.com/shopping-cart:latest
-            docker push \
-              320042238069.dkr.ecr.ap-south-1.amazonaws.com/shopping-cart:latest
+            if [ -z "$AWS_ACCOUNT_ID" ] || [ -z "$AWS_DEFAULT_REGION" ] || [ -z "$ECR_REPOSITORY" ]; then
+              echo "AWS_ACCOUNT_ID, AWS_DEFAULT_REGION and ECR_REPOSITORY must be set"
+              exit 1
+            fi
       - run:
-          name: Log Build Success
+          name: Authenticate to ECR
           command: |
-            echo "Build and Push to ECR completed successfully at $(date)"
-      - on_fail:
-          - run:
-              name: Log Build Failure
-              command: |
-                echo "ERROR: Build and Push to ECR failed at $(date)" >> /tmp/pipeline_errors.log
-                cat /tmp/pipeline_errors.log
+            ECR_REGISTRY="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com"
+            aws ecr get-login-password --region "$AWS_DEFAULT_REGION" | \
+              docker login --username AWS --password-stdin "$ECR_REGISTRY"
+      - run:
+          name: Build Docker image
+          command: |
+            ECR_REGISTRY="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com"
+            docker build -t "$ECR_REGISTRY/$ECR_REPOSITORY:latest" .
+      - run:
+          name: Push Docker image to ECR
+          command: |
+            ECR_REGISTRY="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com"
+            docker push "$ECR_REGISTRY/$ECR_REPOSITORY:latest"
+      - run:
+          name: Build and push success
+          command: echo "Docker image pushed to ECR successfully"
 
   deploy:
     docker:
       - image: cimg/base:stable
     steps:
       - checkout
-      - attach_workspace:
-          at: /tmp
       - run:
           name: Install AWS CLI
-          command: sudo apt update && sudo apt install -y awscli
+          command: |
+            sudo apt-get update -y
+            sudo apt-get install -y python3 python3-pip curl
+            pip3 install --upgrade awscli
       - run:
           name: Setup SSH key
           command: |
@@ -54,121 +58,75 @@ jobs:
             echo "$EC2_SSH_PRIVATE_KEY" | tr -d '\r' > ~/.ssh/id_rsa
             chmod 600 ~/.ssh/id_rsa
       - run:
-          name: Verify EC2 IP
+          name: Validate deploy configuration
           command: |
-            if [ -f /tmp/ec2_ip.txt ]; then
-              echo "EC2 IP found: $(cat /tmp/ec2_ip.txt)"
-            else
-              echo "ERROR: EC2 IP file not found"
+            if [ -z "$EC2_HOST" ] || [ -z "$DEPLOYMENT_USER" ] || [ -z "$DEPLOYMENT_PATH" ] || [ -z "$AWS_ACCOUNT_ID" ] || [ -z "$AWS_DEFAULT_REGION" ] || [ -z "$ECR_REPOSITORY" ] || [ -z "$GIT_REPOSITORY_URL" ]; then
+              echo "EC2_HOST, DEPLOYMENT_USER, DEPLOYMENT_PATH, AWS_ACCOUNT_ID, AWS_DEFAULT_REGION, ECR_REPOSITORY and GIT_REPOSITORY_URL must be set"
               exit 1
             fi
       - run:
-          name: Wait for EC2 SSH
+          name: Verify EC2 connectivity
           command: |
-            EC2_IP=$(cat /tmp/ec2_ip.txt)
-            echo "Waiting for SSH on $EC2_IP ..."
             for i in $(seq 1 30); do
-              if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
-                   ubuntu@$EC2_IP "echo ok" 2>/dev/null; then
+              if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 "$DEPLOYMENT_USER@$EC2_HOST" "echo ok" 2>/dev/null; then
                 echo "EC2 is reachable"
-                break
+                exit 0
               fi
-              echo "Attempt $i/30 — retrying in 10s"
+              echo "Waiting for SSH on $EC2_HOST... ($i/30)"
               sleep 10
             done
+            echo "ERROR: Cannot reach EC2 via SSH"
+            exit 1
       - run:
-          name: Wait for Docker on EC2
+          name: Install Docker, Git, and Docker Compose on EC2
           command: |
-            EC2_IP=$(cat /tmp/ec2_ip.txt)
-            ssh -o StrictHostKeyChecking=no ubuntu@$EC2_IP \
-              "for i in \$(seq 1 20); do
-                 command -v docker && echo 'docker ready' && break
-                 echo 'waiting for docker...'
-                 sleep 10
-               done"
+            ssh -o StrictHostKeyChecking=no "$DEPLOYMENT_USER@$EC2_HOST" "
+              sudo apt-get update -y &&
+              sudo apt-get install -y docker.io git curl &&
+              sudo systemctl enable docker &&
+              sudo systemctl start docker &&
+              sudo mkdir -p /usr/local/lib/docker/cli-plugins &&
+              if ! command -v docker-compose >/dev/null 2>&1; then
+                sudo curl -L \"https://github.com/docker/compose/releases/download/v2.18.1/docker-compose-$(uname -s)-$(uname -m)\" -o /usr/local/lib/docker/cli-plugins/docker-compose &&
+                sudo chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+              fi
+            "
       - run:
           name: Clone or update repo on EC2
           command: |
-            EC2_IP=$(cat /tmp/ec2_ip.txt)
-            ssh -o StrictHostKeyChecking=no ubuntu@$EC2_IP "
-              if [ ! -d /home/ubuntu/E-commerce-website ]; then
-                git clone https://github.com/jeevankanipakam-bit/shopping-cart-ecom.git \
-                  /home/ubuntu/E-commerce-website
+            ssh -o StrictHostKeyChecking=no "$DEPLOYMENT_USER@$EC2_HOST" "
+              if [ ! -d $DEPLOYMENT_PATH ]; then
+                git clone $GIT_REPOSITORY_URL $DEPLOYMENT_PATH
               else
-                cd /home/ubuntu/E-commerce-website && git pull
+                cd $DEPLOYMENT_PATH && git pull
               fi
             "
       - run:
-          name: Write .env file on EC2
+          name: Copy environment file to EC2
           command: |
-            EC2_IP=$(cat /tmp/ec2_ip.txt)
-            {
-              echo "POSTGRES_USER=admin"
-              echo "POSTGRES_PASSWORD=User@2022"
-              echo "POSTGRES_DB=ShoppingCart"
-              echo "ENVIRONMENT=Development"
-              echo "TokenKey=Fn96MkrL3D5RQDL333423JHG23dRJ7tfhA6URq3ax5nDh26UmCNZDq"
-              echo "AdminPassword=AdminUser@2022"
-              echo 'DefaultConnection="host=database;port=5432;username=admin;password=User@2021;database=ShoppingCart"'
-            } > /tmp/app.env
-            scp -o StrictHostKeyChecking=no /tmp/app.env \
-              ubuntu@$EC2_IP:/home/ubuntu/E-commerce-website/E-commerce-website-main/.env
+            if [ -f .circleci/.env ]; then
+              scp -o StrictHostKeyChecking=no .circleci/.env "$DEPLOYMENT_USER@$EC2_HOST:$DEPLOYMENT_PATH/.env"
+            else
+              scp -o StrictHostKeyChecking=no .circleci/.env.example "$DEPLOYMENT_USER@$EC2_HOST:$DEPLOYMENT_PATH/.env"
+            fi
       - run:
-          name: Pull ECR image and start app
+          name: Deploy app on EC2 with Docker Compose
           command: |
-            EC2_IP=$(cat /tmp/ec2_ip.txt)
-            ssh -o StrictHostKeyChecking=no ubuntu@$EC2_IP "
-              aws ecr get-login-password --region ap-south-1 | \
-                sudo docker login --username AWS --password-stdin \
-                320042238069.dkr.ecr.ap-south-1.amazonaws.com &&
-              sudo docker pull \
-                320042238069.dkr.ecr.ap-south-1.amazonaws.com/shopping-cart:latest &&
-              sudo docker tag \
-                320042238069.dkr.ecr.ap-south-1.amazonaws.com/shopping-cart:latest \
-                shopping-cart:latest &&
-              cd /home/ubuntu/E-commerce-website/E-commerce-website-main &&
-              sudo docker-compose down &&
-              sudo docker-compose up -d
+            ssh -o StrictHostKeyChecking=no "$DEPLOYMENT_USER@$EC2_HOST" "
+              sudo aws ecr get-login-password --region $AWS_DEFAULT_REGION | sudo docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com &&
+              cd $DEPLOYMENT_PATH &&
+              sudo docker compose pull || sudo docker-compose pull || true &&
+              sudo docker compose down || sudo docker-compose down || true &&
+              sudo docker compose up -d --no-build || sudo docker-compose up -d --no-build
             "
       - run:
-          name: Log Deployment Success
-          command: |
-            echo "Deployment completed successfully at $(date)" >> /tmp/deployment_log.txt
-      - on_fail:
-          - run:
-              name: Log Deployment Error
-              command: |
-                ERROR_MSG="ERROR: Deployment failed at $(date) for branch: $CIRCLE_BRANCH commit: $CIRCLE_SHA1"
-                echo "$ERROR_MSG" >> /tmp/pipeline_errors.log
-                echo "Deployment Error: $ERROR_MSG"
-
-  notify-failure:
-    docker:
-      - image: cimg/base:stable
-    steps:
-      - run:
-          name: Send Error Notification
-          command: |
-            echo "PIPELINE FAILURE ALERT"
-            echo "======================="
-            echo "Build/Deploy pipeline failed"
-            echo "Repository: $CIRCLE_REPOSITORY_URL"
-            echo "Branch: $CIRCLE_BRANCH"
-            echo "Commit: $CIRCLE_SHA1"
-            echo "Time: $(date)"
-            echo ""
-            echo "Check CircleCI dashboard for details: $CIRCLE_BUILD_URL"
+          name: Deployment success
+          command: echo "Application deployed to EC2 successfully"
 
 workflows:
-  version: 2
   build-deploy:
     jobs:
       - build-and-push
       - deploy:
           requires:
             - build-and-push
-      - notify-failure:
-          requires:
-            - build-and-push
-            - deploy
-          when: on_fail
